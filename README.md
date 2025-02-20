@@ -1,3 +1,7 @@
+# This is a forked copy of TSFormer-VO - [original repo](https://github.com/aofrancani/TSformer-VO)
+
+
+
 # TSformer-VO: an end-to-end Transformer-based model for monocular visual odometry
 
 [![IEEE](https://img.shields.io/badge/IEEE-00629B.svg?style=for-the-badge&logo=IEEE&logoColor=white)](https://ieeexplore.ieee.org/document/10845764)

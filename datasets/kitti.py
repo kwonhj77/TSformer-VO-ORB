@@ -22,7 +22,7 @@ class KITTI(torch.utils.data.Dataset):
     def __init__(self,
                  data_path=r"data/sequences_jpg",
                  gt_path=r"data/poses",
-                 camera_id="2",
+                 camera_id="0",
                  sequences=["00", "02", "08", "09"],
                  window_size=3,
                  overlap=1,

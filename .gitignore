@@ -29,3 +29,6 @@ data
 .gitattributes
 checkpoints
 checkpoints/
+
+# VSCode
+.vscode/
