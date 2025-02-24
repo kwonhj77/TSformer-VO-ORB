@@ -1,3 +1,4 @@
+import cv2
 import glob
 import os
 import pandas as pd
@@ -22,12 +23,15 @@ class KITTI(torch.utils.data.Dataset):
     def __init__(self,
                  data_path=r"data/sequences_jpg",
                  gt_path=r"data/poses",
-                 camera_id="0",
+                 camera_id="2",
                  sequences=["00", "02", "08", "09"],
                  window_size=3,
                  overlap=1,
                  read_poses=True,
-                 transform=None,
+                 resize_transform=None,
+                 preprocess_transform=None,
+                 use_keypoints=True,
+                 num_keypoints=25,
                  ):
 
 
@@ -38,7 +42,14 @@ class KITTI(torch.utils.data.Dataset):
         self.read_poses = read_poses
         self.window_size = window_size
         self.overlap = overlap
-        self.transform = transform
+        self.resize_transform=resize_transform
+        self.preprocess_transform=preprocess_transform
+
+        # ORB
+        self.use_keypoints = use_keypoints
+        self.num_keypoints = num_keypoints
+        self.orb = cv2.ORB_create()
+
 
         # KITTI normalization
         self.mean_angles = np.array([1.7061e-5, 9.5582e-4, -5.5258e-5])
@@ -77,12 +88,22 @@ class KITTI(torch.utils.data.Dataset):
         # Read frames as grayscale
         frames = data["frames"].values
         imgs = []
+        keypoints = []
         for fname in frames:
             img = Image.open(fname).convert('RGB')
+            img = self.resize_transform(img)
+
+            if self.use_keypoints:
+                keypoints.append(self.get_orb_keypoints(img))
+
             # pre processing
-            img = self.transform(img)
+            img = self.preprocess_transform(img)
             img = img.unsqueeze(0)
             imgs.append(img)
+
+        if self.use_keypoints:
+            keypoints = torch.stack(keypoints, dim=0) # T, num_keypoints, 4 (x, y, size, angle)
+
         imgs = np.concatenate(imgs, axis=0)
         imgs = np.asarray(imgs)
         # T C H W -> C T H W.
@@ -117,7 +138,7 @@ class KITTI(torch.utils.data.Dataset):
         y = np.asarray(y)  # discard first value
         y = y.flatten()
 
-        return imgs, y
+        return imgs, keypoints, y
 
     def read_intrinsics_param(self):
         """
@@ -186,6 +207,28 @@ class KITTI(torch.utils.data.Dataset):
                 windowed_df = pd.concat([windowed_df, rows], ignore_index=True)
         windowed_df.reset_index(drop=True)
         return windowed_df
+    
+    def get_orb_keypoints(self, img):
+        grayscale_img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2GRAY)
+        keypoints, descriptors = self.orb.detectAndCompute(grayscale_img, None)
+        sorted_keypoints = sorted(keypoints, key=lambda x: x.response, reverse=True)
+        assert len(sorted_keypoints) > self.num_keypoints, f"Length of keypoints is less than expected f{len(keypoints)}"
+
+        keypoints = sorted_keypoints[:self.num_keypoints]
+
+        # Convert cv2.keypoints objects into tensor
+        keypoints_tensor = torch.transpose(torch.tensor([
+            [k.pt[0] for k in keypoints],
+            [k.pt[1] for k in keypoints],
+            [k.size for k in keypoints],
+        ]), 0, 1) # [num_keypoints, 3 (x, y, size)]
+
+        # normalize values
+        # if self.normalize_keypoints:
+        #     for i in keypoints.shape[0]:
+        #         keypoints_tensor[:, i] = (keypoints_tensor[:, i] - self.keypoint_means[i]) / self.keypoint_stds[i]
+    
+        return keypoints_tensor
 
 
 if __name__ == "__main__":

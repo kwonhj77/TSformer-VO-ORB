@@ -25,7 +25,7 @@ Data structure:
 
 dataset_dir = f".\data\sequences"
 new_root_dir = f".\data\sequences_jpg"
-image_nb = 0  # number of image folder (image_0, image_1, ... image_3)
+image_nb = 2  # number of image folder (image_0, image_1, ... image_3)
 
 # create new directory
 if not os.path.exists(new_root_dir):

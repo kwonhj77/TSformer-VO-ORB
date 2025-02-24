@@ -67,7 +67,9 @@ def build_model(args, model_params):
                               attn_drop_rate=model_params["attn_dropout"],
                               drop_path_rate=model_params["ff_dropout"],
                               num_frames=model_params["num_frames"],
-                              attention_type=model_params["attention_type"])
+                              attention_type=model_params["attention_type"],
+                              use_keypoints=model_params['use_keypoints'],
+                              num_keypoints=model_params['num_keypoints'])
 
     if model_params["time_only"]:
         # for time former without spatial layers

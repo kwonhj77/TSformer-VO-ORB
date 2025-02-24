@@ -13,6 +13,7 @@ import numpy as np
 from timesformer.models.vit_utils import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from timesformer.models.helpers import load_pretrained
 from timesformer.models.vit_utils import DropPath, to_2tuple, trunc_normal_
+from timesformer.models.keypoint_roi import KeypointPatchEmbed
 
 from .build import MODEL_REGISTRY
 from torch import einsum
@@ -86,8 +87,7 @@ class Attention(nn.Module):
            x = self.proj_drop(x)
         return x
 
-class Block(nn.Module):
-
+class FeatureBlock(nn.Module): # without keypoints
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0.1, act_layer=nn.GELU, norm_layer=nn.LayerNorm, attention_type='divided_space_time'):
         super().__init__()
@@ -110,7 +110,6 @@ class Block(nn.Module):
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
-
 
     def forward(self, x, B, T, W):
         num_spatial_tokens = (x.size(1) - 1) // T
@@ -152,6 +151,70 @@ class Block(nn.Module):
             x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x
 
+class KeypointBlock(nn.Module):
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
+                 drop_path=0.1, act_layer=nn.GELU, norm_layer=nn.LayerNorm, attention_type='divided_space_time'):
+        super().__init__()
+        self.attention_type = attention_type
+        assert(attention_type in ['divided_space_time', 'space_only','joint_space_time'])
+
+        self.norm1 = norm_layer(dim)
+        self.attn = Attention(
+           dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+
+        ## Temporal Attention Parameters
+        if self.attention_type == 'divided_space_time':
+            self.temporal_norm1 = norm_layer(dim)
+            self.temporal_attn = Attention(
+              dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+            self.temporal_fc = nn.Linear(dim, dim)
+
+        ## drop path
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+
+    def forward(self, x, B, T, N): # with keypoints
+        num_spatial_tokens = (x.size(1) - 1) // T
+        assert num_spatial_tokens == N
+
+        if self.attention_type in ['space_only', 'joint_space_time']:
+            x = x + self.drop_path(self.attn(self.norm1(x)))
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+            return x
+        elif self.attention_type == 'divided_space_time':
+            ## Temporal
+            xt = x[:,1:,:]
+            xt = rearrange(xt, 'b (n t) m -> (b n) t m',b=B,n=N,t=T)
+            res_temporal = self.drop_path(self.temporal_attn(self.temporal_norm1(xt)))
+            res_temporal = rearrange(res_temporal, '(b n) t m -> b (n t) m',b=B,n=N,t=T)
+            res_temporal = self.temporal_fc(res_temporal)
+            xt = x[:,1:,:] + res_temporal
+
+            ## Spatial
+            init_cls_token = x[:,0,:].unsqueeze(1)
+            cls_token = init_cls_token.repeat(1, T, 1)
+            cls_token = rearrange(cls_token, 'b t m -> (b t) m',b=B,t=T).unsqueeze(1)
+            xs = xt
+            xs = rearrange(xs, 'b (n t) m -> (b t) n m',b=B,n=N,t=T)
+            xs = torch.cat((cls_token, xs), 1)
+            res_spatial = self.drop_path(self.attn(self.norm1(xs)))
+
+            ### Taking care of CLS token
+            cls_token = res_spatial[:,0,:]
+            cls_token = rearrange(cls_token, '(b t) m -> b t m',b=B,t=T)
+            cls_token = torch.mean(cls_token,1,True) ## averaging for every frame
+            res_spatial = res_spatial[:,1:,:]
+            res_spatial = rearrange(res_spatial, '(b t) n m -> b (n t) m',b=B,n=N,t=T)
+            res = res_spatial
+            x = xt
+
+            ## Mlp
+            x = torch.cat((init_cls_token, x), 1) + torch.cat((cls_token, res), 1)
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+            return x
+
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
     """
@@ -180,7 +243,8 @@ class VisionTransformer(nn.Module):
     """
     def __init__(self, img_size=(224, 224), patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
-                 drop_path_rate=0.1, hybrid_backbone=None, norm_layer=nn.LayerNorm, num_frames=8, attention_type='divided_space_time', dropout=0.):
+                 drop_path_rate=0.1, hybrid_backbone=None, norm_layer=nn.LayerNorm, num_frames=8, attention_type='divided_space_time', dropout=0.,
+                 use_keypoints=True, num_keypoints=25):
         super().__init__()
         self.attention_type = attention_type
         self.depth = depth
@@ -191,9 +255,26 @@ class VisionTransformer(nn.Module):
             img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
 
+        # ORB
+        self.use_keypoints = use_keypoints
+        self.num_keypoints = num_keypoints
+        self.keypoint_patch_embed = KeypointPatchEmbed(
+            num_keypoints = num_keypoints,
+            embed_dim = embed_dim
+        )
+        self.keypoint_pos_embed = nn.Sequential(
+            nn.Linear(3, embed_dim // 2, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(embed_dim // 2, embed_dim, bias=False),
+            nn.ReLU(),
+        )
+
         ## Positional Embeddings
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches+1, embed_dim))
+        if self.use_keypoints:
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_keypoints+1, embed_dim))
+        else:
+            self.pos_embed = nn.Parameter(torch.zeros(1, num_patches+1, embed_dim))
         self.pos_drop = nn.Dropout(p=drop_rate)
         if self.attention_type != 'space_only':
             self.time_embed = nn.Parameter(torch.zeros(1, num_frames, embed_dim))
@@ -201,11 +282,18 @@ class VisionTransformer(nn.Module):
 
         ## Attention Blocks
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, self.depth)]  # stochastic depth decay rule
-        self.blocks = nn.ModuleList([
-            Block(
-                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, attention_type=self.attention_type)
-            for i in range(self.depth)])
+        if use_keypoints:
+            self.blocks = nn.ModuleList([
+                KeypointBlock(
+                    dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
+                    drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, attention_type=self.attention_type)
+                for i in range(self.depth)])
+        else:
+            self.blocks = nn.ModuleList([
+                FeatureBlock(
+                    dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
+                    drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer, attention_type=self.attention_type)
+                for i in range(self.depth)])
         self.norm = norm_layer(embed_dim)
 
         # Classifier head
@@ -289,7 +377,7 @@ class VisionTransformer(nn.Module):
 
         ## Attention blocks
         for blk in self.blocks:
-            x = blk(x, B, T, W)
+            x = blk(x, B=B, T=T, W=W)
 
         ### Predictions for space-only baseline
         if self.attention_type == 'space_only':
@@ -299,8 +387,58 @@ class VisionTransformer(nn.Module):
         x = self.norm(x)
         return x[:, 0]
 
-    def forward(self, x):
-        x = self.forward_features(x)
+    def forward_keypoints(self, x, keypoints): # ORB version
+        # Embed ORB keypoints
+        key_patch_embed = self.keypoint_patch_embed(x, keypoints) # B, T, O, d
+        key_pos_embed = self.keypoint_pos_embed(keypoints) # B, T, O, d
+        object_tokens = key_patch_embed + key_pos_embed # B, T, O, d
+        B, T, O, _ = object_tokens.shape
+        object_tokens = object_tokens.flatten(0,1) # (BT), O, d
+
+        x = object_tokens
+
+        # add pos embedding
+        cls_tokens = self.cls_token.expand(x.size(0), -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1) # (BT), 1+O, d
+        x = x + self.pos_embed # BT, 1+O, d
+
+        # Droppout
+        x = self.pos_drop(x)
+
+        ## Time Embeddings
+        if self.attention_type != 'space_only':
+            cls_tokens = x[:B, 0, :].unsqueeze(1)
+            x = x[:,1:]
+            x = rearrange(x, '(b t) n m -> (b n) t m',b=B,t=T)
+            ## Resizing time embeddings in case they don't match
+            if T != self.time_embed.size(1):
+                time_embed = self.time_embed.transpose(1, 2)
+                new_time_embed = F.interpolate(time_embed, size=(T), mode='nearest')
+                new_time_embed = new_time_embed.transpose(1, 2)
+                x = x + new_time_embed
+            else:
+                x = x + self.time_embed
+            x = self.time_drop(x)
+            x = rearrange(x, '(b n) t m -> b (n t) m',b=B,t=T)
+            x = torch.cat((cls_tokens, x), dim=1)
+
+        ## Attention blocks
+        for blk in self.blocks:
+            x = blk(x, B=B, T=T, N=O)
+
+        ### Predictions for space-only baseline
+        if self.attention_type == 'space_only':
+            x = rearrange(x, '(b t) n m -> b t n m',b=B,t=T)
+            x = torch.mean(x, 1) # averaging predictions for every frame
+
+        x = self.norm(x)
+        return x[:, 0]
+
+    def forward(self, x, keypoints):
+        if self.use_keypoints:
+            x = self.forward_keypoints(x, keypoints) # with ORB
+        else:
+            x = self.forward_features(x) # Baseline
         x = self.head(x)
         return x
 

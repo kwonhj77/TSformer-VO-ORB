@@ -1,3 +1,4 @@
+import copy
 import os
 import torch
 import torch.optim as optim
@@ -17,14 +18,19 @@ torch.manual_seed(2023)
 def val_epoch(model, val_loader, criterion, args):
     epoch_loss = 0
     with tqdm(val_loader, unit="batch") as tepoch:
-        for images, gt in tepoch:
+        for images, keypoints, gt in tepoch:
             tepoch.set_description(f"Validating ")
             # for batch_idx, (images, odom) in enumerate(train_loader):
             if torch.cuda.is_available():
                 images, gt = images.cuda(), gt.cuda()
+                if not isinstance(keypoints, list):
+                    keypoints = keypoints.cuda()
 
             # predict pose
-            estimated_pose = model(images.float())
+            if model.use_keypoints:
+                estimated_pose = model(images.float(), keypoints.float())
+            else:
+                estimated_pose = model(images.float(), keypoints)
 
             # compute loss
             loss = compute_loss(estimated_pose, gt, criterion, args)
@@ -40,14 +46,19 @@ def train_epoch(model, train_loader, criterion, optimizer, epoch, tensorboard_wr
     iter = (epoch - 1) * len(train_loader) + 1
 
     with tqdm(train_loader, unit="batch") as tepoch:
-        for images, gt in tepoch:
+        for images, keypoints, gt in tepoch:
             tepoch.set_description(f"Epoch {epoch}")
             # for batch_idx, (images, odom) in enumerate(train_loader):
             if torch.cuda.is_available():
                 images, gt = images.cuda(), gt.cuda()
+                if not isinstance(keypoints, list):
+                    keypoints = keypoints.cuda()
 
             # predict pose
-            estimated_pose = model(images.float())
+            if model.use_keypoints:
+                estimated_pose = model(images.float(), keypoints.float())
+            else:
+                estimated_pose = model(images.float(), keypoints)
 
             # compute loss
             loss = compute_loss(estimated_pose, gt, criterion, args)
@@ -157,45 +168,7 @@ def compute_loss(y_hat, y, criterion, args):
     return loss
 
 
-if __name__ == "__main__":
-
-    # set hyperparameters and configuration
-    args = {
-        "data_dir": "data",
-        "bsize": 4,  # batch size
-        "val_split": 0.1,  # percentage to use as validation data
-        "window_size": 2,  # number of frames in window
-        "overlap": 1,  # number of frames overlapped between windows
-        "optimizer": "Adam",  # optimizer [Adam, SGD, Adagrad, RAdam]
-        "lr": 1e-5,  # learning rate
-        "momentum": 0.9,  # SGD momentum
-        "weight_decay": 1e-4,  # SGD momentum
-        "epoch": 100,  # train iters each timestep
-    	"weighted_loss": None,  # float to weight angles in loss function
-      	"pretrained_ViT": False,  # load weights from pre-trained ViT
-        "checkpoint_path": "checkpoints/Exp4",  # path to save checkpoint
-        "checkpoint": None,  # checkpoint
-    }
-
-    # tiny  - patch_size=16, embed_dim=192, depth=12, num_heads=3
-    # small - patch_size=16, embed_dim=384, depth=12, num_heads=6
-    # base  - patch_size=16, embed_dim=768, depth=12, num_heads=12
-    model_params = {
-        "dim": 384,
-        "image_size": (192, 640),  #(192, 640),
-        "patch_size": 16,
-        "attention_type": 'divided_space_time',  # ['divided_space_time', 'space_only','joint_space_time', 'time_only']
-        "num_frames": args["window_size"],
-        "num_classes": 6 * (args["window_size"] - 1),  # 6 DoF for each frame
-        "depth": 12,
-        "heads": 6,
-        "dim_head": 64,
-        "attn_dropout": 0.1,
-        "ff_dropout": 0.1,
-        "time_only": False,
-    }
-    args["model_params"] = model_params
-
+def run_single_model(args):
     # create checkpoints folder
     if not os.path.exists(args["checkpoint_path"]):
         os.makedirs(args["checkpoint_path"])
@@ -209,8 +182,8 @@ if __name__ == "__main__":
     TensorBoardWriter = SummaryWriter(log_dir=args["checkpoint_path"])
 
     # preprocessing operation
+    resize_transform = transforms.Resize((args['model_params']["image_size"]))
     preprocess = transforms.Compose([
-        transforms.Resize((model_params["image_size"])),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=[0.34721234, 0.36705238, 0.36066107],
@@ -220,7 +193,14 @@ if __name__ == "__main__":
     # train and val dataloader
     print("Using CUDA: ", torch.cuda.is_available())
     print("Loading data...")
-    dataset = KITTI(window_size=args["window_size"], overlap=args["overlap"], transform=preprocess)
+    dataset = KITTI(
+            window_size=args["window_size"],
+            overlap=args["overlap"],
+            resize_transform=resize_transform,
+            preprocess_transform=preprocess,
+            use_keypoints=args["model_params"]["use_keypoints"],
+            num_keypoints=args["model_params"]["num_keypoints"]
+    )
     nb_val = round(args["val_split"] * len(dataset))
 
     train_data, val_data = random_split(dataset, [len(dataset) - nb_val, nb_val]) #generator=torch.Generator().manual_seed(2))
@@ -236,7 +216,7 @@ if __name__ == "__main__":
 
     # build and load model
     print("Building model...")
-    model, args = build_model(args, model_params)
+    model, args = build_model(args, args['model_params'])
 
     # loss and optimizer
     criterion = torch.nn.MSELoss()
@@ -245,3 +225,65 @@ if __name__ == "__main__":
     # train network
     print(20*"--" +  " Training " + 20*"--")
     train(model, train_loader, val_loader, criterion, optimizer, TensorBoardWriter, args)
+
+if __name__ == "__main__":
+
+    models = {
+        'baseline_base': None,
+        'orbViT_base_no_descriptors_128_keypoints': None,
+    }
+
+    # BASELINE: set hyperparameters and configuration
+    base_args = {
+        "data_dir": "data",
+        "bsize": 4,  # batch size
+        "val_split": 0.1,  # percentage to use as validation data
+        "window_size": 2,  # number of frames in window
+        "overlap": 1,  # number of frames overlapped between windows
+        "optimizer": "Adam",  # optimizer [Adam, SGD, Adagrad, RAdam]
+        "lr": 1e-5,  # learning rate
+        "momentum": 0.9,  # SGD momentum
+        "weight_decay": 1e-4,  # SGD momentum
+        "epoch": 100,  # train iters each timestep
+    	"weighted_loss": None,  # float to weight angles in loss function
+      	"pretrained_ViT": False,  # load weights from pre-trained ViT
+        "checkpoint_path": "checkpoints/baseline_base",  # path to save checkpoint
+        "checkpoint": None,  # checkpoint
+    }
+
+    # tiny  - patch_size=16, embed_dim=192, depth=12, num_heads=3
+    # small - patch_size=16, embed_dim=384, depth=12, num_heads=6
+    # base  - patch_size=16, embed_dim=768, depth=12, num_heads=12
+    base_model_params = {
+        "use_keypoints": False, # Use ORB keypoints as an additional input
+        "num_keypoints": -1, # Number of keypoints to use per frame
+        "dim": 768,
+        "image_size": (192, 640),  # (192, 640),
+        "patch_size": 16,
+        "attention_type": 'divided_space_time',  # ['divided_space_time', 'space_only','joint_space_time', 'time_only']
+        "num_frames": base_args["window_size"],
+        "num_classes": 6 * (base_args["window_size"] - 1),  # 6 DoF for each frame
+        "depth": 12,
+        "heads": 12,
+        "attn_dropout": 0.1,
+        "ff_dropout": 0.1,
+        "time_only": False,
+    }
+    base_args["model_params"] = base_model_params
+    models["baseline_base"] = copy.deepcopy(base_args)
+
+    args = copy.deepcopy(base_args)
+    args["checkpoint_path"] = "checkpoints/orbViT_base_no_descriptors_128_keypoints"
+    args['model_params']["use_keypoints"] = True
+    args['model_params']["num_keypoints"] = 128
+    models["orbViT_base_no_descriptors_128_keypoints"] = args
+
+
+    for key, val in models.items():
+        print(f"Executing {key}...")
+        run_single_model(val)
+
+
+
+
+    
