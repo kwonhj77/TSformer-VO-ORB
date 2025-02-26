@@ -5,7 +5,7 @@ charset-normalizer==3.4.1
 cycler==0.12.1
 dataclasses==0.6
 einops==0.8.1
-fvcore==0.1.5
+fvcore
 google-auth==2.38.0
 google-auth-oauthlib==1.2.1
 grpcio==1.70.0
@@ -13,10 +13,10 @@ idna==3.10
 importlib-metadata==8.6.1
 importlib-resources==6.5.2
 iopath==0.1.10
-kiwisolver==1.4.8
+kiwisolver
 Markdown==3.7
-matplotlib==3.10.0
-numpy==2.2.3
+matplotlib
+numpy
 oauthlib==3.2.2
 opencv-python
 pandas==2.2.3
@@ -39,8 +39,6 @@ tensorboard==2.19.0
 tensorboard-data-server==0.7.2
 tensorboard-plugin-wit==1.8.1
 termcolor==2.5.0
-torch==2.6.0
-torchvision==0.21.0
 tqdm==4.67.1
 typing_extensions==4.12.2
 urllib3==2.3.0
