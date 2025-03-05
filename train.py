@@ -18,7 +18,7 @@ torch.manual_seed(2023)
 def val_epoch(model, val_loader, criterion, args):
     epoch_loss = 0
     with tqdm(val_loader, unit="batch") as tepoch:
-        for images, keypoints, gt in tepoch:
+        for images, keypoints, gt, descriptors in tepoch:
             tepoch.set_description(f"Validating ")
             # for batch_idx, (images, odom) in enumerate(train_loader):
             if torch.cuda.is_available():
@@ -46,7 +46,7 @@ def train_epoch(model, train_loader, criterion, optimizer, epoch, tensorboard_wr
     iter = (epoch - 1) * len(train_loader) + 1
 
     with tqdm(train_loader, unit="batch") as tepoch:
-        for images, keypoints, gt in tepoch:
+        for images, keypoints, gt, descriptors in tepoch:
             tepoch.set_description(f"Epoch {epoch}")
             # for batch_idx, (images, odom) in enumerate(train_loader):
             if torch.cuda.is_available():
@@ -257,14 +257,14 @@ if __name__ == "__main__":
     base_model_params = {
         "use_keypoints": False, # Use ORB keypoints as an additional input
         "num_keypoints": -1, # Number of keypoints to use per frame
-        "dim": 768,
+        "dim": 192,
         "image_size": (192, 640),  # (192, 640),
         "patch_size": 16,
         "attention_type": 'divided_space_time',  # ['divided_space_time', 'space_only','joint_space_time', 'time_only']
         "num_frames": base_args["window_size"],
         "num_classes": 6 * (base_args["window_size"] - 1),  # 6 DoF for each frame
         "depth": 12,
-        "heads": 12,
+        "heads": 3,
         "attn_dropout": 0.1,
         "ff_dropout": 0.1,
         "time_only": False,

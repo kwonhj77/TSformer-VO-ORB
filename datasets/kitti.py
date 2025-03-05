@@ -31,7 +31,8 @@ class KITTI(torch.utils.data.Dataset):
                  resize_transform=None,
                  preprocess_transform=None,
                  use_keypoints=True,
-                 num_keypoints=25,
+                 num_keypoints=400,
+                 use_descriptors=False,
                  ):
 
 
@@ -48,6 +49,7 @@ class KITTI(torch.utils.data.Dataset):
         # ORB
         self.use_keypoints = use_keypoints
         self.num_keypoints = num_keypoints
+        self.use_descriptors = use_descriptors
         self.orb = cv2.ORB_create()
 
 
@@ -89,12 +91,16 @@ class KITTI(torch.utils.data.Dataset):
         frames = data["frames"].values
         imgs = []
         keypoints = []
+        descriptors = []
         for fname in frames:
             img = Image.open(fname).convert('RGB')
             img = self.resize_transform(img)
 
             if self.use_keypoints:
-                keypoints.append(self.get_orb_keypoints(img))
+                keypoint, descriptor = self.get_orb_keypoints(img)
+                keypoints.append(keypoint)
+                if self.use_descriptors:
+                    descriptors.append(descriptor)
 
             # pre processing
             img = self.preprocess_transform(img)
@@ -103,6 +109,8 @@ class KITTI(torch.utils.data.Dataset):
 
         if self.use_keypoints:
             keypoints = torch.stack(keypoints, dim=0) # T, num_keypoints, 4 (x, y, size, angle)
+            if self.use_descriptors:
+                descriptors = torch.stack(descriptors, dim=0) # T, num_keypoints, 32
 
         imgs = np.concatenate(imgs, axis=0)
         imgs = np.asarray(imgs)
@@ -138,7 +146,7 @@ class KITTI(torch.utils.data.Dataset):
         y = np.asarray(y)  # discard first value
         y = y.flatten()
 
-        return imgs, keypoints, y
+        return imgs, keypoints, y, descriptors
 
     def read_intrinsics_param(self):
         """
@@ -214,21 +222,24 @@ class KITTI(torch.utils.data.Dataset):
         sorted_keypoints = sorted(keypoints, key=lambda x: x.response, reverse=True)
         assert len(sorted_keypoints) > self.num_keypoints, f"Length of keypoints is less than expected f{len(keypoints)}"
 
-        keypoints = sorted_keypoints[:self.num_keypoints]
+        key_desc = ((k,d) for k, d in zip(keypoints, descriptors))
+        sorted_key_desc = sorted(key_desc, key=lambda x: x[0].response, reverse=True)
+        sorted_descriptors = [x[1] for x in sorted_key_desc]
+
+        sorted_keypoints = sorted_keypoints[:self.num_keypoints]
+        sorted_descriptors = sorted_descriptors[:self.num_keypoints]
 
         # Convert cv2.keypoints objects into tensor
         keypoints_tensor = torch.transpose(torch.tensor([
-            [k.pt[0] for k in keypoints],
-            [k.pt[1] for k in keypoints],
-            [k.size for k in keypoints],
+            [k.pt[0] for k in sorted_keypoints],
+            [k.pt[1] for k in sorted_keypoints],
+            [k.size for k in sorted_keypoints],
         ]), 0, 1) # [num_keypoints, 3 (x, y, size)]
 
-        # normalize values
-        # if self.normalize_keypoints:
-        #     for i in keypoints.shape[0]:
-        #         keypoints_tensor[:, i] = (keypoints_tensor[:, i] - self.keypoint_means[i]) / self.keypoint_stds[i]
+        # Convert descriptors to tensor
+        descriptors_tensor = torch.tensor(sorted_descriptors)
     
-        return keypoints_tensor
+        return keypoints_tensor, descriptors_tensor
 
 
 if __name__ == "__main__":
